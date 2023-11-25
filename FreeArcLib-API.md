@@ -128,15 +128,17 @@ struct Filter
 
 void Filter::ProtoBufDecode(ProtoBufDecoder &pb)
 {
-    while(pb.get_next_field())
+    int field_num, field_type;
+
+    while( pb.get_next_field( &field_num, &field_type))
     {
-        switch(pb.field_num)
+        switch(field_num)
         {
-            case 1: pb.parse_int(&size, &has_size); break;
-            case 2: pb.parse_string(&name, &has_name); break;
-            case 3: pb.parse_repeated_int(&values, &num_values); break;
-            case 4: pb.parse_repeated_string(&subnames, &num_subnames); break;
-            default: pb.skip_field();
+            case 1: pb.parse_int_field( field_type, &size, &has_size); break;
+            case 2: pb.parse_string_field( field_type, &name, &has_name); break;
+            case 3: pb.parse_repeated_int_field( field_type, &values, &num_values); break;
+            case 4: pb.parse_repeated_string_field( field_type, &subnames, &num_subnames); break;
+            default: pb.skip_field( field_type);
         }
     }
 }
@@ -149,4 +151,98 @@ ProtoBufDecoder pb(buf,size);
 filter.ProtoBufDecode(pb);
 if(pb.error)
     abort("Internal error: " + pb.error_message());
+```
+
+and implementation details:
+
+```C
+bool ProtoBufDecoder::get_next_field(int* field_num, int* field_type)
+{
+    if(error || (ptr == buf_end))  return false;
+
+    int64_t number = parse_int_value(VARINT);
+    if(error)  return false;
+
+    *field_num = (number >> 3);
+    *field_type = (number & 7);
+    return true;
+}
+
+template <typename IntegerType>
+void ProtoBufDecoder::parse_int_field(int field_type, IntegerType *field, bool *has_field)
+{
+    int64_t value = parse_int_value(field_type);
+    if(error) return;
+    *field = value;
+    *has_field = true;
+}
+
+void ProtoBufDecoder::parse_string_field(int field_type, char **field, bool *has_field)
+{
+    char *s = parse_string_value(field_type);
+    if(error) return;
+
+    *field = s;
+    *has_field = true;
+}
+
+void ProtoBufDecoder::parse_repeated_string_field(int field_type, char ***field, size_t *num_values)
+{
+    char *s = parse_string_value(field_type);
+    if(error) return;
+
+    char **new_array = realloc(*field, (*num_values + 2) * sizeof(char*));
+    if(new_array == nullptr)  {set_error(...); return;}
+
+    new_array[*num_values] = s;
+    new_array[*num_values + 1] = nullptr;
+
+    *field = new_array;
+    *num_values += 1;
+}
+
+
+int64_t ProtoBufDecoder::parse_int_value(int field_type)
+{
+    if (field_type == FIXED64) {
+        if(buf_end - ptr < 8)  {set_error(...); return 0;}
+        ptr += 8;
+        return *(int64_t*)(ptr-8);  // TODO: reverse byte order on big-endians
+    }
+
+    if (field_type == VARINT) {
+        int64_t value = 0;
+        int shift = 0;
+
+        do {
+            if(ptr == buf_end)  {set_error(...); return 0;}
+            auto extend = (*ptr & 128);
+            auto byte = (*ptr & 127);
+            value += (byte << shift);
+            ptr++;  shift += 7;
+        } while(extend);
+
+        return value;
+    }
+    // parse FIXED32...
+
+    set_error(...);
+    return 0;
+}
+
+char* ProtoBufDecoder::parse_string_value(int field_type)
+{
+    if(field_type != LEN)  {set_error(...); return nullptr;}
+    int64_t len = parse_int_value(VARINT);
+    if(buf_end - ptr < len)  {set_error(...); return nullptr;}
+
+    char *s = malloc(len+1);  // TODO: custom memory allocation
+    if(s == nullptr)  {set_error(...); return nullptr;}
+
+    memcpy(s, ptr, len);
+    s[len] = 0;
+
+    ptr += len;
+    return s;
+}
 ```
